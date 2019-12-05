@@ -3,16 +3,16 @@ package com.dueeeke.dkplayer.activity;
 import android.annotation.SuppressLint;
 import android.content.res.Configuration;
 import android.os.Bundle;
-import android.support.annotation.Nullable;
-import android.support.v4.content.ContextCompat;
 import android.view.Gravity;
-import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewParent;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
+import androidx.annotation.Nullable;
+import androidx.core.content.ContextCompat;
+
 import com.dueeeke.dkplayer.util.DebugTextViewHelper;
+import com.dueeeke.dkplayer.util.Utils;
 
 /**
  * 监控相关代码封装
@@ -46,19 +46,12 @@ public class DebugActivity extends BaseActivity {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         if (newConfig.orientation == Configuration.ORIENTATION_PORTRAIT) {
-            removeViewFromParent(mDebugInfo);
+            Utils.removeViewFormParent(mDebugInfo);
             addContentView(mDebugInfo, mDebugInfo.getLayoutParams());
         } else if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) {
-            removeViewFromParent(mDebugInfo);
+            Utils.removeViewFormParent(mDebugInfo);
             ViewGroup decorView = (ViewGroup) getWindow().getDecorView();
             decorView.addView(mDebugInfo);
-        }
-    }
-
-    private void removeViewFromParent(View view) {
-        ViewParent parent = view.getParent();
-        if (parent instanceof ViewGroup) {
-            ((ViewGroup) parent).removeView(view);
         }
     }
 

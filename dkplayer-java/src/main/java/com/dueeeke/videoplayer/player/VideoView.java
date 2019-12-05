@@ -23,11 +23,8 @@ import androidx.annotation.Nullable;
 import com.dueeeke.videoplayer.R;
 import com.dueeeke.videoplayer.controller.BaseVideoController;
 import com.dueeeke.videoplayer.controller.MediaPlayerControl;
-import com.dueeeke.videoplayer.listener.OnVideoViewStateChangeListener;
-import com.dueeeke.videoplayer.listener.PlayerEventListener;
 import com.dueeeke.videoplayer.render.IRenderView;
-import com.dueeeke.videoplayer.render.SurfaceRenderView;
-import com.dueeeke.videoplayer.render.TextureRenderView;
+import com.dueeeke.videoplayer.render.RenderViewFactory;
 import com.dueeeke.videoplayer.util.L;
 import com.dueeeke.videoplayer.util.PlayerUtils;
 
@@ -38,10 +35,11 @@ import java.util.Map;
 
 /**
  * 播放器
- * Created by Devlin_n on 2017/4/7.
+ * Created by dueeeke on 2017/4/7.
  */
 
-public class VideoView<P extends AbstractPlayer> extends FrameLayout implements MediaPlayerControl, PlayerEventListener {
+public class VideoView<P extends AbstractPlayer> extends FrameLayout
+        implements MediaPlayerControl, AbstractPlayer.PlayerEventListener {
 
     protected P mMediaPlayer;//播放器
     protected PlayerFactory<P> mPlayerFactory;//工厂类，用于实例化播放核心
@@ -49,6 +47,7 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
     protected BaseVideoController mVideoController;//控制器
 
     protected IRenderView mRenderView;
+    protected RenderViewFactory mRenderViewFactory;
     /**
      * 真正承载播放器视图的容器
      */
@@ -79,8 +78,8 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
 
     //--------- data sources ---------//
     protected String mUrl;//当前播放视频的地址
-    protected AssetFileDescriptor mAssetFileDescriptor;//assets文件
     protected Map<String, String> mHeaders;//当前视频地址的请求头
+    protected AssetFileDescriptor mAssetFileDescriptor;//assets文件
 
     protected long mCurrentPosition;//当前正在播放视频的位置
 
@@ -94,6 +93,7 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
     public static final int STATE_PLAYBACK_COMPLETED = 5;
     public static final int STATE_BUFFERING = 6;
     public static final int STATE_BUFFERED = 7;
+    public static final int STATE_START_ABORT = 8;//开始播放中止
     protected int mCurrentPlayState = STATE_IDLE;//当前播放器的状态
 
     public static final int PLAYER_NORMAL = 10;        // 普通播放器
@@ -102,16 +102,16 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
     protected int mCurrentPlayerState = PLAYER_NORMAL;
 
     /**
-     * 监听系统中其他播放的音频焦点改变，当然也包括自己的App内
+     * 监听系统中音频焦点改变，见{@link #setEnableAudioFocus(boolean)}
      */
     protected boolean mEnableAudioFocus;
     @Nullable
     protected AudioFocusHelper mAudioFocusHelper;
 
     /**
-     * OnVideoViewStateChangeListener集合，保存了所有开发者设置的监听器
+     * OnStateChangeListener集合，保存了所有开发者设置的监听器
      */
-    protected List<OnVideoViewStateChangeListener> mOnVideoViewStateChangeListeners;
+    protected List<OnStateChangeListener> mOnStateChangeListeners;
 
     /**
      * 进度管理器，设置之后播放器会记录播放进度，以便下次播放恢复进度
@@ -120,25 +120,14 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
     protected ProgressManager mProgressManager;
 
     /**
-     * 使用SurfaceView渲染视频，默认是TextureView
-     */
-    protected boolean mUsingSurfaceView;
-
-    /**
      * 循环播放
      */
     protected boolean mIsLooping;
 
     /**
-     * 启用MediaCodec解码,就是所谓的硬解码，此设置仅适用于ijkplayer
+     * {@link #mPlayerContainer}背景色，默认黑色
      */
-    protected boolean mEnableMediaCodec;
-
-    /**
-     * 支持多开，注意这里的多开不仅仅是指同一个页面需要同时存在多个播放器，也适用于Activity和Activity之间以及Activity
-     * 和Fragment之间，甚至是Fragment和Fragment之间的场景。
-     */
-    protected boolean mEnableParallelPlay;
+    private int mPlayerBackgroundColor;
 
     public VideoView(@NonNull Context context) {
         this(context, null);
@@ -153,23 +142,18 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
 
         //读取全局配置
         VideoViewConfig config = VideoViewManager.getConfig();
-        mUsingSurfaceView = config.mUsingSurfaceView;
-        mEnableMediaCodec = config.mEnableMediaCodec;
         mEnableAudioFocus = config.mEnableAudioFocus;
-        mEnableParallelPlay = config.mEnableParallelPlay;
         mProgressManager = config.mProgressManager;
-        //默认使用系统的MediaPlayer进行解码
         mPlayerFactory = config.mPlayerFactory;
         mCurrentScreenScaleType = config.mScreenScaleType;
+        mRenderViewFactory = config.mRenderViewFactory;
 
         //读取xml中的配置，并综合全局配置
         TypedArray a = context.obtainStyledAttributes(attrs, R.styleable.VideoView);
-        mUsingSurfaceView = a.getBoolean(R.styleable.VideoView_usingSurfaceView, mUsingSurfaceView);
         mEnableAudioFocus = a.getBoolean(R.styleable.VideoView_enableAudioFocus, mEnableAudioFocus);
-        mEnableMediaCodec = a.getBoolean(R.styleable.VideoView_enableMediaCodec, mEnableMediaCodec);
-        mEnableParallelPlay = a.getBoolean(R.styleable.VideoView_enableParallelPlay, mEnableParallelPlay);
         mIsLooping = a.getBoolean(R.styleable.VideoView_looping, false);
         mCurrentScreenScaleType = a.getInt(R.styleable.VideoView_screenScaleType, mCurrentScreenScaleType);
+        mPlayerBackgroundColor = a.getColor(R.styleable.VideoView_playerBackgroundColor, Color.BLACK);
         a.recycle();
 
         initView();
@@ -180,11 +164,18 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
      */
     protected void initView() {
         mPlayerContainer = new FrameLayout(getContext());
-        mPlayerContainer.setBackgroundColor(Color.BLACK);
+        mPlayerContainer.setBackgroundColor(mPlayerBackgroundColor);
         LayoutParams params = new LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT);
         this.addView(mPlayerContainer, params);
+    }
+
+    /**
+     * 设置{@link #mPlayerContainer}的背景色
+     */
+    public void setPlayerBackgroundColor(int color) {
+        mPlayerContainer.setBackgroundColor(color);
     }
 
     /**
@@ -193,9 +184,8 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
     @Override
     public void start() {
         boolean isStarted = false;
-        if (isInIdleState()) {
-            startPlay();
-            isStarted = true;
+        if (isInIdleState() || isInStartAbortState()) {
+            isStarted = startPlay();
         } else if (isInPlaybackState()) {
             startInPlaybackState();
             isStarted = true;
@@ -209,28 +199,26 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
 
     /**
      * 第一次播放
+     * @return 是否成功开始播放
      */
-    protected void startPlay() {
-        if (!mEnableParallelPlay) {
-            VideoViewManager.instance().release();
-        }
-        VideoViewManager.instance().addVideoView(this);
-
+    protected boolean startPlay() {
         //如果要显示移动网络提示则不继续播放
-        if (showNetWarning()) return;
-
+        if (showNetWarning()) {
+            //中止播放
+            setPlayState(STATE_START_ABORT);
+            return false;
+        }
         //监听音频焦点改变
         if (mEnableAudioFocus) {
             mAudioFocusHelper = new AudioFocusHelper(this);
         }
-
         //读取播放进度
         if (mProgressManager != null) {
             mCurrentPosition = mProgressManager.getSavedProgress(mUrl);
         }
-
         initPlayer();
         startPrepare(false);
+        return true;
     }
 
     /**
@@ -261,7 +249,7 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
      * 初始化播放器
      */
     protected void initPlayer() {
-        mMediaPlayer = mPlayerFactory.createPlayer();
+        mMediaPlayer = mPlayerFactory.createPlayer(getContext());
         mMediaPlayer.setPlayerEventListener(this);
         setInitOptions();
         mMediaPlayer.initPlayer();
@@ -278,7 +266,6 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
      * 初始化之后的配置项
      */
     protected void setOptions() {
-        mMediaPlayer.setEnableMediaCodec(mEnableMediaCodec);
         mMediaPlayer.setLooping(mIsLooping);
     }
 
@@ -290,11 +277,8 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
             mPlayerContainer.removeView(mRenderView.getView());
             mRenderView.release();
         }
-        if (mUsingSurfaceView) {
-            mRenderView = new SurfaceRenderView(getContext(), mMediaPlayer);
-        } else {
-            mRenderView = new TextureRenderView(getContext(), mMediaPlayer);
-        }
+        mRenderView = mRenderViewFactory.createRenderView(getContext());
+        mRenderView.attachToPlayer(mMediaPlayer);
         LayoutParams params = new LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -306,7 +290,11 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
      * 开始准备播放（直接播放）
      */
     protected void startPrepare(boolean reset) {
-        if (reset) mMediaPlayer.reset();
+        if (reset) {
+            mMediaPlayer.reset();
+            //重新设置option，media player reset之后，option会失效
+            setOptions();
+        }
         if (prepareDataSource()) {
             mMediaPlayer.prepareAsync();
             setPlayState(STATE_PREPARING);
@@ -322,7 +310,7 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
         if (mAssetFileDescriptor != null) {
             mMediaPlayer.setDataSource(mAssetFileDescriptor);
             return true;
-        } if (!TextUtils.isEmpty(mUrl)) {
+        } else if (!TextUtils.isEmpty(mUrl)) {
             mMediaPlayer.setDataSource(mUrl, mHeaders);
             return true;
         }
@@ -342,12 +330,14 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
      */
     @Override
     public void pause() {
-        if (isPlaying()) {
+        if (isInPlaybackState()
+                && mMediaPlayer.isPlaying()) {
             mMediaPlayer.pause();
             setPlayState(STATE_PAUSED);
-            setKeepScreenOn(false);
-            if (mAudioFocusHelper != null)
+            if (mAudioFocusHelper != null) {
                 mAudioFocusHelper.abandonFocus();
+            }
+            setKeepScreenOn(false);
         }
     }
 
@@ -359,8 +349,9 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
                 && !mMediaPlayer.isPlaying()) {
             mMediaPlayer.start();
             setPlayState(STATE_PLAYING);
-            if (mAudioFocusHelper != null)
+            if (mAudioFocusHelper != null) {
                 mAudioFocusHelper.requestFocus();
+            }
             setKeepScreenOn(true);
         }
     }
@@ -379,14 +370,19 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
      * 释放播放器
      */
     public void release() {
-        VideoViewManager.instance().removeVideoView(this);
-        if (mVideoController != null) {
-            mVideoController.hideNetWarning();
-        }
         if (!isInIdleState()) {
-            saveProgress();
-            mMediaPlayer.release();
-            mMediaPlayer = null;
+            //释放播放器
+            if (mMediaPlayer != null) {
+                mMediaPlayer.release();
+                mMediaPlayer = null;
+            }
+            //释放renderView
+            if (mRenderView != null) {
+                mPlayerContainer.removeView(mRenderView.getView());
+                mRenderView.release();
+                mRenderView = null;
+            }
+            //释放Assets资源
             if (mAssetFileDescriptor != null) {
                 try {
                     mAssetFileDescriptor.close();
@@ -394,15 +390,18 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
                     e.printStackTrace();
                 }
             }
-            setKeepScreenOn(false);
+            //关闭AudioFocus监听
             if (mAudioFocusHelper != null) {
                 mAudioFocusHelper.abandonFocus();
+                mAudioFocusHelper = null;
             }
-            if (mRenderView != null) {
-                mPlayerContainer.removeView(mRenderView.getView());
-                mRenderView.release();
-            }
+            //关闭屏幕常亮
+            setKeepScreenOn(false);
+            //保存播放进度
+            saveProgress();
+            //重置播放进度
             mCurrentPosition = 0;
+            //切换转态
             setPlayState(STATE_IDLE);
         }
     }
@@ -411,7 +410,7 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
      * 保存播放进度
      */
     protected void saveProgress() {
-        if (mCurrentPosition != 0 && mProgressManager != null) {
+        if (mProgressManager != null && mCurrentPosition > 0) {
             L.d("saveProgress: " + mCurrentPosition);
             mProgressManager.saveProgress(mUrl, mCurrentPosition);
         }
@@ -425,15 +424,22 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
                 && mCurrentPlayState != STATE_ERROR
                 && mCurrentPlayState != STATE_IDLE
                 && mCurrentPlayState != STATE_PREPARING
+                && mCurrentPlayState != STATE_START_ABORT
                 && mCurrentPlayState != STATE_PLAYBACK_COMPLETED;
     }
 
     /**
-     * 是否处于未播放转态，此时{@link #mMediaPlayer}为null
+     * 是否处于未播放状态
      */
     protected boolean isInIdleState() {
-        return mMediaPlayer == null
-                || mCurrentPlayState == STATE_IDLE;
+        return mCurrentPlayState == STATE_IDLE;
+    }
+
+    /**
+     * 播放中止状态
+     */
+    private boolean isInStartAbortState() {
+        return mCurrentPlayState == STATE_START_ABORT;
     }
 
     /**
@@ -531,13 +537,13 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
      */
     @Override
     public void onCompletion() {
-        setPlayState(STATE_PLAYBACK_COMPLETED);
         setKeepScreenOn(false);
         mCurrentPosition = 0;
         if (mProgressManager != null) {
             //播放完成，清除进度
             mProgressManager.saveProgress(mUrl, 0);
         }
+        setPlayState(STATE_PLAYBACK_COMPLETED);
     }
 
     @Override
@@ -618,6 +624,7 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
      * @param headers 请求头
      */
     public void setUrl(String url, Map<String, String> headers) {
+        mAssetFileDescriptor = null;
         mUrl = url;
         mHeaders = headers;
     }
@@ -626,6 +633,7 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
      * 用于播放assets里面的视频文件
      */
     public void setAssetFileDescriptor(AssetFileDescriptor fd) {
+        mUrl = null;
         this.mAssetFileDescriptor = fd;
     }
 
@@ -666,24 +674,11 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
     }
 
     /**
-     * 是否启用SurfaceView，默认不启用
-     */
-    public void setUsingSurfaceView(boolean usingSurfaceView) {
-        mUsingSurfaceView = usingSurfaceView;
-    }
-
-    /**
-     * 是否开启AudioFocus监听， 默认开启
+     * 是否开启AudioFocus监听， 默认开启，用于监听其它地方是否获取音频焦点，如果有其它地方获取了
+     * 音频焦点，此播放器将做出相应反应，具体实现见{@link AudioFocusHelper}
      */
     public void setEnableAudioFocus(boolean enableAudioFocus) {
         mEnableAudioFocus = enableAudioFocus;
-    }
-
-    /**
-     * 是否使用MediaCodec进行解码（硬解码），默认不开启，使用软解
-     */
-    public void setEnableMediaCodec(boolean enableMediaCodec) {
-        mEnableMediaCodec = enableMediaCodec;
     }
 
     /**
@@ -698,9 +693,20 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
 
     /**
      * 支持多开
+     * @deprecated 此api已经无效，你需要自己去控制同时只有一个播放器在播放的效果
      */
+    @Deprecated
     public void setEnableParallelPlay(boolean enableParallelPlay) {
-        mEnableParallelPlay = enableParallelPlay;
+    }
+
+    /**
+     * 自定义RenderView，继承{@link RenderViewFactory}实现自己的RenderView
+     */
+    public void setRenderViewFactory(RenderViewFactory renderViewFactory) {
+        if (renderViewFactory == null) {
+            throw new IllegalArgumentException("RenderViewFactory can not be null!");
+        }
+        mRenderViewFactory = renderViewFactory;
     }
 
     /**
@@ -715,20 +721,23 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
         if (decorView == null)
             return;
 
+        mIsFullScreen = true;
+
         //隐藏NavigationBar和StatusBar
         if (mHideNavBarView == null) {
             mHideNavBarView = new View(getContext());
         }
         mHideNavBarView.setSystemUiVisibility(FULLSCREEN_FLAGS);
         mPlayerContainer.addView(mHideNavBarView);
-        getActivity().getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getActivity().getWindow().setFlags(
+                WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
         //从当前FrameLayout中移除播放器视图
         this.removeView(mPlayerContainer);
         //将播放器视图添加到DecorView中即实现了全屏
         decorView.addView(mPlayerContainer);
 
-        mIsFullScreen = true;
         setPlayerState(PLAYER_FULL_SCREEN);
     }
 
@@ -744,6 +753,8 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
         if (decorView == null)
             return;
 
+        mIsFullScreen = false;
+
         //显示NavigationBar和StatusBar
         mPlayerContainer.removeView(mHideNavBarView);
         getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -752,7 +763,6 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
         decorView.removeView(mPlayerContainer);
         this.addView(mPlayerContainer);
 
-        mIsFullScreen = false;
         setPlayerState(PLAYER_NORMAL);
     }
 
@@ -775,13 +785,17 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
     }
 
     /**
-     * 获取Activity
+     * 获取Activity，优先通过Controller去获取Activity
      */
     protected Activity getActivity() {
-        Activity activity = PlayerUtils.scanForActivity(getContext());
-        if (activity == null) {
-            if (mVideoController == null) return null;
+        Activity activity;
+        if (mVideoController != null) {
             activity = PlayerUtils.scanForActivity(mVideoController.getContext());
+            if (activity == null) {
+                activity = PlayerUtils.scanForActivity(getContext());
+            }
+        } else {
+            activity = PlayerUtils.scanForActivity(getContext());
         }
         return activity;
     }
@@ -946,9 +960,9 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
         mCurrentPlayState = playState;
         if (mVideoController != null)
             mVideoController.setPlayState(playState);
-        if (mOnVideoViewStateChangeListeners != null) {
-            for (int i = 0, z = mOnVideoViewStateChangeListeners.size(); i < z; i++) {
-                OnVideoViewStateChangeListener listener = mOnVideoViewStateChangeListeners.get(i);
+        if (mOnStateChangeListeners != null) {
+            for (int i = 0, z = mOnStateChangeListeners.size(); i < z; i++) {
+                OnStateChangeListener listener = mOnStateChangeListeners.get(i);
                 if (listener != null) {
                     listener.onPlayStateChanged(playState);
                 }
@@ -963,9 +977,9 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
         mCurrentPlayerState = playerState;
         if (mVideoController != null)
             mVideoController.setPlayerState(playerState);
-        if (mOnVideoViewStateChangeListeners != null) {
-            for (int i = 0, z = mOnVideoViewStateChangeListeners.size(); i < z; i++) {
-                OnVideoViewStateChangeListener listener = mOnVideoViewStateChangeListeners.get(i);
+        if (mOnStateChangeListeners != null) {
+            for (int i = 0, z = mOnStateChangeListeners.size(); i < z; i++) {
+                OnStateChangeListener listener = mOnStateChangeListeners.get(i);
                 if (listener != null) {
                     listener.onPlayerStateChanged(playerState);
                 }
@@ -974,42 +988,61 @@ public class VideoView<P extends AbstractPlayer> extends FrameLayout implements 
     }
 
     /**
-     * 监听播放状态变化
+     * 播放状态改变监听器
      */
-    public void addOnVideoViewStateChangeListener(@NonNull OnVideoViewStateChangeListener listener) {
-        if (mOnVideoViewStateChangeListeners == null) {
-            mOnVideoViewStateChangeListeners = new ArrayList<>();
-        }
-        mOnVideoViewStateChangeListeners.add(listener);
+    public interface OnStateChangeListener {
+        void onPlayerStateChanged(int playerState);
+        void onPlayStateChanged(int playState);
     }
 
     /**
-     * 移除播放状态监听
+     * OnStateChangeListener的空实现。用的时候只需要重写需要的方法
      */
-    public void removeOnVideoViewStateChangeListener(@NonNull OnVideoViewStateChangeListener listener) {
-        if (mOnVideoViewStateChangeListeners != null) {
-            mOnVideoViewStateChangeListeners.remove(listener);
+    public static class SimpleOnStateChangeListener implements OnStateChangeListener {
+        @Override
+        public void onPlayerStateChanged(int playerState) {}
+        @Override
+        public void onPlayStateChanged(int playState) {}
+    }
+
+    /**
+     * 添加一个播放状态监听器，播放状态发生变化时将会调用。
+     */
+    public void addOnStateChangeListener(@NonNull OnStateChangeListener listener) {
+        if (mOnStateChangeListeners == null) {
+            mOnStateChangeListeners = new ArrayList<>();
+        }
+        mOnStateChangeListeners.add(listener);
+    }
+
+    /**
+     * 移除某个播放状态监听
+     */
+    public void removeOnStateChangeListener(@NonNull OnStateChangeListener listener) {
+        if (mOnStateChangeListeners != null) {
+            mOnStateChangeListeners.remove(listener);
         }
     }
 
     /**
-     * 设置播放状态监听
+     * 设置一个播放状态监听器，播放状态发生变化时将会调用，
+     * 如果你想同时设置多个监听器，推荐 {@link #addOnStateChangeListener(OnStateChangeListener)}。
      */
-    public void setOnVideoViewStateChangeListener(@NonNull OnVideoViewStateChangeListener listener) {
-        if (mOnVideoViewStateChangeListeners == null) {
-            mOnVideoViewStateChangeListeners = new ArrayList<>();
+    public void setOnStateChangeListener(@NonNull OnStateChangeListener listener) {
+        if (mOnStateChangeListeners == null) {
+            mOnStateChangeListeners = new ArrayList<>();
         } else {
-            mOnVideoViewStateChangeListeners.clear();
+            mOnStateChangeListeners.clear();
         }
-        mOnVideoViewStateChangeListeners.add(listener);
+        mOnStateChangeListeners.add(listener);
     }
 
     /**
      * 移除所有播放状态监听
      */
-    public void clearOnVideoViewStateChangeListeners() {
-        if (mOnVideoViewStateChangeListeners != null) {
-            mOnVideoViewStateChangeListeners.clear();
+    public void clearOnStateChangeListeners() {
+        if (mOnStateChangeListeners != null) {
+            mOnStateChangeListeners.clear();
         }
     }
 
